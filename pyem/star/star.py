@@ -43,6 +43,8 @@ class Relion:
     ANGLEROT = "rlnAngleRot"
     ANGLETILT = "rlnAngleTilt"
     ANGLEPSI = "rlnAnglePsi"
+    ANGLETILTPRIOR = "rlnAngleTiltPrior"
+    ANGLEPSIPRIOR = "rlnAnglePsiPrior"
     CLASS = "rlnClassNumber"
     DEFOCUSU = "rlnDefocusU"
     DEFOCUSV = "rlnDefocusV"
