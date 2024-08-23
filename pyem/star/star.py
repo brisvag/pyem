@@ -16,13 +16,11 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
 import re
 import os.path
 from collections import Counter
 import numpy as np
 import pandas as pd
-import sys
 from math import modf
 from pyem.geom import e2r_vec
 from pyem.geom import rot2euler
@@ -116,6 +114,12 @@ class Relion:
     TOMOIMPORTCTFFINDFILD = "rlnTomoImportCtfFindFile"
     TOMOIMPORTIMODDIR = "rlnTomoImportImodDir"
     TOMOIMPORTFRACTIONALDOSE = "rlnTomoImportFractionalDose"
+    TOMOSUBTOMOSARE2DSTACKS = "rlnTomoSubTomosAre2DStacks"
+    TOMOTILTSERIESPIXELSIZE = "rlnTomoTiltSeriesPixelSize"
+    CTFDATACTFPREMULTIPLIED = "rlnCtfDataAreCtfPremultiplied"
+    SUBTOMOGRAMBINNING = "rlnTomoSubtomogramBinning"
+    TOMOPARTICLENAME = "rlnTomoParticleName"
+    TOMOPARTICLEID = "rlnTomoParticleId"
 
     # Field lists.
     COORDS = [COORDX, COORDY]
@@ -129,7 +133,8 @@ class Relion:
     CTF_PARAMS = [DEFOCUSU, DEFOCUSV, DEFOCUSANGLE, CS, PHASESHIFT, AC,
                   BEAMTILTX, BEAMTILTY, BEAMTILTCLASS, CTFSCALEFACTOR, CTFBFACTOR,
                   CTFMAXRESOLUTION, CTFFIGUREOFMERIT]
-    MICROSCOPE_PARAMS = [VOLTAGE, MAGNIFICATION, DETECTORPIXELSIZE, IMAGEPIXELSIZE, MICROGRAPHPIXELSIZE]
+    MICROSCOPE_PARAMS = [VOLTAGE, MAGNIFICATION, DETECTORPIXELSIZE, IMAGEPIXELSIZE,
+                         MICROGRAPHPIXELSIZE, MICROGRAPHORIGINALPIXELSIZE]
     MICROGRAPH_COORDS = [MICROGRAPH_NAME] + COORDS
     PICK_PARAMS = MICROGRAPH_COORDS + [ANGLEPSI, CLASS, AUTOPICKFIGUREOFMERIT]
 
@@ -146,8 +151,9 @@ class Relion:
                 IMAGEPIXELSIZE, IMAGESIZE, IMAGEDIMENSION]
 
     OPTICSGROUPTABLE = [AC, CS, VOLTAGE, BEAMTILTX, BEAMTILTY, OPTICSGROUPNAME, ODDZERNIKE, EVENZERNIKE,
-                        MAGMAT00, MAGMAT01, MAGMAT10, MAGMAT11, IMAGEPIXELSIZE, IMAGESIZE, IMAGEDIMENSION,
-                        MICROGRAPHPIXELSIZE, MICROGRAPHORIGINALPIXELSIZE]
+                        MAGMAT00, MAGMAT01, MAGMAT10, MAGMAT11, IMAGEDIMENSION, IMAGESIZE,
+                        MICROGRAPHPIXELSIZE, MICROGRAPHORIGINALPIXELSIZE, TOMOTILTSERIESPIXELSIZE, IMAGEPIXELSIZE,
+                        SUBTOMOGRAMBINNING, CTFDATACTFPREMULTIPLIED]
 
     PATH_FIELDS = [MICROGRAPH_NAME, MICROGRAPHMOVIE_NAME, MICROGRAPHGAIN_NAME]
 
@@ -194,6 +200,7 @@ class UCSF:
     ZERNIKE_COEFS_EVEN = [Z_0_0, Z_neg2_2, Z_0_2, Z_2_2, Z_neg4_4, Z_neg2_4, Z_0_4, Z_2_4, Z_4_4]
 
     PATH_FIELDS = [IMAGE_PATH]
+
 
 def smart_merge(s1, s2, fields, key=None, left_key=None):
     if key is None:
@@ -247,7 +254,7 @@ def merge_key(s1, s2, threshold=0.5):
 
 
 def is_particle_star(df):
-    return df.columns.intersection([Relion.IMAGE_NAME] + Relion.COORDS).size
+    return df.columns.intersection([Relion.IMAGE_NAME, Relion.TOMOPARTICLENAME] + Relion.COORDS).size
 
 
 def calculate_apix(df):
@@ -285,6 +292,12 @@ def to_micrographs(df):
     mu = gb.mean()
     df = mu[[c for c in Relion.CTF_PARAMS + Relion.MICROSCOPE_PARAMS +
              [Relion.MICROGRAPH_NAME, Relion.OPTICSGROUP] if c in mu]].reset_index()
+    # if Relion.IMAGEPIXELSIZE in df:
+    #     if Relion.MICROGRAPHPIXELSIZE not in df and Relion.MICROGRAPHORIGINALPIXELSIZE not in df:
+    #         if Relion.MICROGRAPHBINNING in df:
+    #             df[Relion.MICROGRAPHORIGINALPIXELSIZE] = df[Relion.IMAGEPIXELSIZE] / df[Relion.MICROGRAPHBINNING]
+    #         df[Relion.MICROGRAPHPIXELSIZE] = df[Relion.IMAGEPIXELSIZE]
+    #     df.drop(columns=[Relion.IMAGEPIXELSIZE], inplace=True)
     if Relion.OPTICSGROUP in df:
         df = df.astype(Relion.DATATYPES)
     return df
@@ -332,6 +345,12 @@ def recenter(df, inplace=False):
     diffxy = df[Relion.ORIGINS] - intoff
     df[Relion.COORDS] = df[Relion.COORDS] - intoff
     df[Relion.ORIGINS] = diffxy
+    if Relion.ORIGINZ in df:
+        intoffz = np.round(df[Relion.ORIGINZ]).values
+        diffz = df[Relion.ORIGINZ] - intoffz
+        df[Relion.COORDZ] = df[Relion.COORDZ] - intoffz
+        df[Relion.ORIGINZ] = diffz
+    sync_coords_from_pixel(df)
     return df
 
 
@@ -340,6 +359,11 @@ def recenter_modf(df, inplace=False):
     remxy, offsetxy = np.vectorize(modf)(df[Relion.ORIGINS])
     df[Relion.ORIGINS] = remxy
     df[Relion.COORDS] = df[Relion.COORDS] - offsetxy
+    if Relion.ORIGINZ in df:
+        remz, offsetz = np.vectorize(modf)(df[Relion.ORIGINZ])
+        df[Relion.ORIGINZ] = remz
+        df[Relion.COORDZ] = df[Relion.COORDZ] - offsetz
+    sync_coords_from_pixel(df)
     return df
 
 
@@ -395,183 +419,6 @@ def set_optics_groups(df, sep="_", idx=4, inplace=False):
     df[Relion.OPTICSGROUPNAME] = df[UCSF.MICROGRAPH_BASENAME].str.split(sep, expand=True).loc[:, idx]
     df[Relion.OPTICSGROUP] = pd.Categorical(df[Relion.OPTICSGROUPNAME]).codes + 1
     return df
-
-
-def parse_star_table_header(starfile, offset=0, keep_index=False):
-    headers = []
-    foundheader = False
-    ln = 0
-    with open(starfile, 'r') as f:
-        f.seek(offset)
-        for l in f:
-            if l.lstrip().startswith("_"):
-                foundheader = True
-                lastheader = True
-                if keep_index:
-                    head = l.strip()
-                else:
-                    head = l.split('#')[0].strip().lstrip('_')
-                headers.append(head)
-            else:
-                lastheader = False
-            if foundheader and not lastheader:
-                break
-            ln += 1
-    return headers, ln
-
-
-def parse_star_table(starfile, offset=0, nrows=None, keep_index=False):
-    headers, ln = parse_star_table_header(starfile, offset=offset, keep_index=keep_index)
-    with open(starfile, 'r') as f:
-        f.seek(offset)
-        df = pd.read_csv(f, delimiter='\s+', header=None, skiprows=ln, nrows=nrows)
-    df.columns = headers
-    return df
-
-
-def star_table_offsets(starfile):
-    tables = {}
-    with open(starfile) as f:
-        l = f.readline()  # Current line
-        ln = 0  # Current line number.
-        offset = 0  # Char offset of current table.
-        cnt = 0  # Number of tables.
-        data_line = 0  # First line of a table's data.
-        in_table = False  # True if file cursor is inside a table.
-        in_loop = False  # True if file cursor is inside a loop header.
-        blank_terminates = False  # True if a blank line should terminate a table.
-        table_name = None
-        while l:
-            if l.lstrip().startswith("data"):
-                if table_name is not None and table_name not in tables:  # Unterminated table without a loop.
-                    in_table = False
-                    tables[table_name] = (offset, lineno, ln - 1, ln - data_line - 1)
-                table_name = l.strip()
-                if in_table:
-                    tables[table_name] = (offset, lineno, ln - 1, ln - data_line - 1)
-                in_table = True
-                in_loop = False
-                blank_terminates = False
-                offset = f.tell()  # Record byte offset of table.
-                lineno = ln  # Record start line of table.
-                cnt += 1  # Increment table count.
-            if l.lstrip().startswith("loop"):
-                in_loop = True
-            elif in_loop and not l.startswith("_"):
-                in_loop = False
-                blank_terminates = True
-                data_line = ln
-            if blank_terminates and in_table and l.isspace():  # Allow blankline to terminate table.
-                in_table = False
-                tables[table_name] = (offset, lineno, ln - 1, ln - data_line)
-            l = f.readline()  # Read next line.
-            ln += 1  # Increment line number.
-        if in_table and table_name not in tables:
-            tables[table_name] = (offset, lineno, ln, ln - data_line)
-        return tables
-
-
-def parse_star_tables(starfile, keep_index=False, nrows=sys.maxsize):
-    tables = star_table_offsets(starfile)
-    dfs = {}
-    for t in tables:
-        if tables[t][2] == tables[t][3]:
-            headers, _ = parse_star_table_header(starfile, offset=tables[t][0], keep_index=keep_index)
-            dfs[t] = pd.Series({t.split()[0]: t.split()[1] for t in headers})
-        else:
-            dfs[t] = parse_star_table(starfile, offset=tables[t][0], nrows=min(tables[t][3], nrows),
-                                      keep_index=keep_index)
-    return dfs
-
-
-def parse_star(starfile, keep_index=False, augment=True, nrows=sys.maxsize):
-    tables = star_table_offsets(starfile)
-    dfs = {t: parse_star_table(starfile, offset=tables[t][0], nrows=min(tables[t][3], nrows), keep_index=keep_index)
-           for t in tables}
-    if Relion.OPTICDATA in dfs:
-        if Relion.PARTICLEDATA in dfs:
-            data_table = Relion.PARTICLEDATA
-        elif Relion.MICROGRAPHDATA in dfs:
-            data_table = Relion.MICROGRAPHDATA
-        elif Relion.IMAGEDATA in dfs:
-            data_table = Relion.IMAGEDATA
-        else:
-            data_table = None
-        if data_table is not None:
-            df = pd.merge(dfs[Relion.OPTICDATA], dfs[data_table], on=Relion.OPTICSGROUP)
-        else:
-            df = dfs[Relion.OPTICDATA]
-    else:
-        df = dfs[next(iter(dfs))]
-    df = check_defaults(df, inplace=True)
-    if augment:
-        augment_star_ucsf(df, inplace=True)
-    return df
-
-
-def write_star_table(starfile, df, table="data_", resort_fields=True, mode='w'):
-    indexed = re.search("#\d+$", df.columns[0]) is not None  # Check first column for '#N' index.
-    if not indexed:
-        if resort_fields:
-            df = sort_fields(df, inplace=True)
-        names = [idx + " #%d" % (i + 1) for i, idx in enumerate(df.columns)]
-    else:
-        names = df.columns
-    with open(starfile, mode) as f:
-        f.write('\n')
-        f.write(table + '\n')
-        f.write('\n')
-        f.write("loop_" + '\n')
-        for name in names:
-            line = name + " \n"
-            line = line if line.startswith('_') else '_' + line
-            f.write(line)
-    df.to_csv(starfile, mode='a', sep=' ', header=False, index=False, float_format='%.6f')
-
-
-def write_star_series(starfile, series, table="data_general", resort_fields=True, mode='w'):
-    series = series.copy()
-    if resort_fields:
-        series = series.sort_index()
-    series.index = [i if i.startswith("_") else "_" + i for i in series.index]
-    with open(starfile, mode) as f:
-        f.write('\n')
-        f.write(table + '\n')
-        f.write('\n')
-        series.to_csv(f, sep=' ', header=False, float_format='%.6f')
-        f.write('\n')
-
-
-def write_star_tables(starfile, dfs, resort_fields=True):
-    for i, t in enumerate(dfs):
-        mode = 'w' if i == 0 else 'a+'
-        if isinstance(dfs[t], pd.DataFrame):
-            write_star_table(starfile, dfs[t], table=t, resort_fields=resort_fields, mode=mode)
-        elif isinstance(dfs[t], pd.Series):
-            write_star_series(starfile, dfs[t], table=t, resort_fields=resort_fields, mode=mode)
-        else:
-            raise TypeError("STAR table must have type DataFrame or Series")
-
-
-def write_star(starfile, df, resort_fields=True, resort_records=False, simplify=True, optics=True):
-    if not starfile.endswith(".star"):
-        starfile += ".star"
-    if resort_records:
-        df = sort_records(df, inplace=True)
-    if simplify:
-        df = simplify_star_ucsf(df)
-
-    if optics:
-        if Relion.OPTICSGROUP not in df:
-            df[Relion.OPTICSGROUP] = 1
-        gb = df.groupby(Relion.OPTICSGROUP)
-        df_optics = gb[df.columns.intersection(Relion.OPTICSGROUPTABLE)].first().reset_index(drop=False)
-        df = df.drop(columns=Relion.OPTICSGROUPTABLE, errors="ignore")
-        data_table = Relion.PARTICLEDATA if is_particle_star(df) else Relion.MICROGRAPHDATA
-        dfs = {Relion.OPTICDATA: df_optics, data_table: df}
-        write_star_tables(starfile, dfs, resort_fields=resort_fields)
-    else:
-        write_star_table(starfile, df, table=Relion.IMAGEDATA, resort_fields=resort_fields)
 
 
 def transform_star(df, r, t=None, inplace=False, rots=None, invert=False,
@@ -636,7 +483,7 @@ def transform_star(df, r, t=None, inplace=False, rots=None, invert=False,
 def augment_star_ucsf(df, inplace=True):
     df = df if inplace else df.copy()
     df.reset_index(inplace=True)
-    if "@" in df.iloc[0][Relion.IMAGE_NAME]:
+    if Relion.IMAGE_NAME in df and "@" in df.iloc[0][Relion.IMAGE_NAME]:
         if Relion.IMAGE_NAME in df:
             df[[UCSF.IMAGE_INDEX, UCSF.IMAGE_PATH]] = \
                     df[Relion.IMAGE_NAME].str.split("@", n=2, expand=True)
@@ -736,11 +583,7 @@ def check_defaults(df, inplace=False):
     elif Relion.DETECTORPIXELSIZE in df and Relion.MAGNIFICATION in df:
         df[Relion.IMAGEPIXELSIZE] = df[Relion.DETECTORPIXELSIZE] * df[Relion.MAGNIFICATION] / 10000
 
-    for it in zip(Relion.ORIGINSANGST3D, Relion.ORIGINS3D):
-        if it[0] in df:
-            df[it[1]] = df[it[0]] / df[Relion.IMAGEPIXELSIZE]
-        elif it[1] in df:
-            df[it[0]] = df[it[1]] * df[Relion.IMAGEPIXELSIZE]
+    sync_coords_from_angst(df)
 
     if Relion.ORIGINZANGST in df:
         df[Relion.IMAGEDIMENSION] = 3
@@ -828,4 +671,22 @@ def decode_byte_strings(df, fmt='UTF-8', inplace=False):
     for f in byte_fields:
         if f in df:
             df[f] = df[f].apply(lambda x: x.decode(fmt))
+    return df
+
+
+def sync_coords_from_pixel(df):
+    for it in zip(Relion.ORIGINS3D, Relion.ORIGINSANGST3D):
+        if it[0] in df:
+            df[it[1]] = df[it[0]] * df[Relion.IMAGEPIXELSIZE]
+        elif it[1] in df:
+            df[it[0]] = df[it[1]] / df[Relion.IMAGEPIXELSIZE]
+    return df
+
+
+def sync_coords_from_angst(df):
+    for it in zip(Relion.ORIGINSANGST3D, Relion.ORIGINS3D):
+        if it[0] in df:
+            df[it[1]] = df[it[0]] / df[Relion.IMAGEPIXELSIZE]
+        elif it[1] in df:
+            df[it[0]] = df[it[1]] * df[Relion.IMAGEPIXELSIZE]
     return df

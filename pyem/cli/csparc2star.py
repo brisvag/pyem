@@ -17,7 +17,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
 import argparse
 import json
 import logging
@@ -41,7 +40,7 @@ def main(args):
                     "Use --noswapxy if unswapping is needed (unlikely).")
 
     if args.input[0].endswith(".cs"):
-        log.debug("Detected CryoSPARC 2+ .cs file")
+        log.info("Detected CryoSPARC 2+ .cs file")
         cs = np.load(args.input[0])
         if args.first10k:
             cs = cs[:10000]
@@ -59,6 +58,8 @@ def main(args):
             data_general = metadata.cryosparc_2_cs_movie_parameters(cs, passthroughs=pts, trajdir=trajdir, path=args.micrograph_path)
             data_general[star.Relion.MICROGRAPHMETADATA] = data_general[star.Relion.MICROGRAPH_NAME].apply(
                 lambda x: os.path.join(args.output, os.path.basename(x.rstrip(".mrc")) + ".star"))
+            data_general[star.Relion.MICROGRAPH_NAME] = data_general[star.Relion.MICROGRAPH_NAME].apply(
+                lambda x: os.path.join(args.output, os.path.basename(x)))
             for mic in metadata.cryosparc_2_cs_motion_parameters(cs, data_general, trajdir=trajdir):
                 fn = mic[star.Relion.GENERALDATA][star.Relion.MICROGRAPHMETADATA]
                 log.debug("Writing %s" % fn)
@@ -80,7 +81,7 @@ def main(args):
             log.error("Required fields could not be mapped. Are you using the right input file(s)?")
             return 1
     else:
-        log.debug("Detected CryoSPARC 0.6.5 .csv file")
+        log.info("Detected CryoSPARC 0.6.5 .csv file")
         if len(args.input) > 1:
             log.error("Only one file at a time supported for CryoSPARC 0.6.5 .csv format")
             return 1
@@ -90,11 +91,12 @@ def main(args):
     if args.cls is not None:
         df = star.select_classes(df, args.cls)
 
-    if args.flipy:
+    if args.flipy or args.flipy_pose:
         log.info("Flipping refined shifts in Y")
         df[star.Relion.ORIGINY] = -df[star.Relion.ORIGINY]
         log.info("Flipping particle orientation through XZ plane")
         df = star.transform_star(df, np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]]), leftmult=True)
+    if args.flipy or args.flipy_ctf:
         log.info("Flipping defocus angles")
         df[star.Relion.DEFOCUSANGLE] = -df[star.Relion.DEFOCUSANGLE]
 
@@ -108,10 +110,10 @@ def main(args):
              glob(args.copy_micrograph_coordinates)), join="inner")
         key = star.merge_key(df, coord_star, threshold=0)
         if key is None and not args.strip_uid:
-            log.debug("Merge key not found, removing leading UIDs")
+            log.info("Merge key not found, removing leading UIDs")
             df = star.strip_path_uids(df, inplace=True)
             key = star.merge_key(df, coord_star)
-        log.debug("Coordinates merge key: %s" % key)
+        log.info("Coordinates merge key: %s" % key)
         if args.cached or key == star.Relion.IMAGE_NAME:
             fields = star.Relion.MICROGRAPH_COORDS
         else:
@@ -142,7 +144,7 @@ def main(args):
     return 0
 
 
-if __name__ == "__main__":
+def _main_():
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="Cryosparc metadata .csv (v0.6.5) or .cs (v2+) files", nargs="*")
     parser.add_argument("output", help="Output .star file")
@@ -164,16 +166,24 @@ if __name__ == "__main__":
                         action="store_false")
     parser.add_argument("--invertx", help="Invert particle coordinate X axis", action="store_true")
     parser.add_argument("--inverty", help="Invert particle coordinate Y axis", action="store_false")
-    parser.add_argument("--flipy", help="Invert refined particle Y shifts", action="store_true")
+    parser.add_argument("--flipy", help="Invert particle Y shifts, angles, defocus angle", action="store_true")
+    parser.add_argument("--flipy-pose", help="Invert particle Y shifts and angles", action="store_true")
+    parser.add_argument("--flipy-ctf", help="Invert particle defocus angle", action="store_true")
     parser.add_argument("--cached", help="Keep paths from the Cryosparc 2+ cache when merging coordinates",
                         action="store_true")
     parser.add_argument("--transform",
                         help="Apply rotation matrix or 3x4 rotation plus translation matrix to particles (Numpy format)",
                         type=str)
     parser.add_argument("--relion2", "-r2", help="Relion 2 compatible outputs", action="store_true")
-    parser.add_argument("--strip-uid", help="Strip all leading UIDs from file names", nargs="?", default=None, const=-1,
-                        type=int)
+    parser.add_argument("--strip-uid",
+                        help=("Strip all leading UIDs from file names (default) or provide an integer to strip that number "
+                        "of UIDs (starting from the left)"),
+                        nargs="?", default=None, const=-1, type=int)
     parser.add_argument("--10k", help="Only read first 10,000 particles for rapid testing.", action="store_true",
                         dest="first10k")
     parser.add_argument("--loglevel", "-l", type=str, default="WARNING", help="Logging level and debug output")
     sys.exit(main(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    _main_()

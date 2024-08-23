@@ -17,7 +17,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
 from six import iteritems
 import glob
 import json
@@ -34,7 +33,7 @@ def main(args):
     if args.info:
         args.input.append(args.output)
 
-    df = pd.concat((star.parse_star(inp, augment=args.augment) for inp in args.input), join="inner")
+    df = pd.concat((star.parse_starfile(inp, augment=args.augment) for inp in args.input), join="inner")
 
     dfaux = None
 
@@ -112,6 +111,17 @@ def main(args):
             dfaux = df.loc[~mask]
         df = df.loc[mask]
 
+    if args.subsample is not None and args.suffix != "":
+        if args.subsample < 1:
+            print("Specific integer sample size")
+            return 1
+        nsamplings = args.bootstrap if args.bootstrap is not None else df.shape[0] / int(args.subsample)
+        inds = np.random.choice(df.shape[0], size=(nsamplings, int(args.subsample)),
+                                replace=args.bootstrap is not None)
+        for i, ind in enumerate(inds):
+            star.write_star(os.path.join(args.output, os.path.basename(args.input[0])[:-5] + args.suffix + "_%d" % (i + 1)),
+                       df.iloc[ind])
+
     if args.strip_uid is not None:
         df = star.strip_path_uids(df, inplace=True, count=args.strip_uid)
 
@@ -185,17 +195,6 @@ def main(args):
     if args.pick:
         df.drop(df.columns.difference(star.Relion.PICK_PARAMS), axis=1, inplace=True, errors="ignore")
 
-    if args.subsample is not None and args.suffix != "":
-        if args.subsample < 1:
-            print("Specific integer sample size")
-            return 1
-        nsamplings = args.bootstrap if args.bootstrap is not None else df.shape[0] / int(args.subsample)
-        inds = np.random.choice(df.shape[0], size=(nsamplings, int(args.subsample)),
-                                replace=args.bootstrap is not None)
-        for i, ind in enumerate(inds):
-            star.write_star(os.path.join(args.output, os.path.basename(args.input[0])[:-5] + args.suffix + "_%d" % (i + 1)),
-                       df.iloc[ind])
-
     if args.to_micrographs:
         df = star.to_micrographs(df)
 
@@ -211,10 +210,22 @@ def main(args):
         df = star.replace_micrograph_path(df, args.micrograph_path, inplace=True)
 
     if args.min_separation is not None:
-        gb = df.groupby(star.Relion.MICROGRAPH_NAME)
+        if star.Relion.MICROGRAPH_NAME in df:
+            gb_field = star.Relion.MICROGRAPH_NAME
+        elif star.Relion.TOMONAME in df:
+            gb_field = star.Relion.TOMONAME
+        else:
+            raise ValueError("%s or %s must be in df" % (star.Relion.MICROGRAPH_NAME, star.Relion.TOMONAME))
+        gb = df.groupby(gb_field)
         dupes = []
+        if star.Relion.ORIGINZ in df:
+            origin_fields = star.Relion.ORIGINS3D
+            coord_fields = star.Relion.COORDS3D
+        else:
+            origin_fields = star.Relion.ORIGINS
+            coord_fields = star.Relion.COORDS
         for n, g in gb:
-            nb = algo.query_connected(g[star.Relion.COORDS].values - g[star.Relion.ORIGINS],
+            nb = algo.query_connected(g[coord_fields].values - g[origin_fields],
                                       args.min_separation / star.calculate_apix(df))
             dupes.extend(g.index[~np.isnan(nb)])
         dfaux = df.loc[dupes]
@@ -262,30 +273,29 @@ def main(args):
     if args.split_micrographs:
         dfs = star.split_micrographs(df)
         for mg in dfs:
-            star.write_star(os.path.join(args.output, os.path.basename(mg)[:-4]) + args.suffix, dfs[mg])
+            star.write_starfile(os.path.join(args.output, os.path.basename(mg)[:-4]) + args.suffix, dfs[mg])
         return 0
 
     if args.auxout is not None and dfaux is not None:
         if not args.relion2:
             df = star.remove_deprecated_relion2(dfaux, inplace=True)
-            star.write_star(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=True)
+            star.write_starfile(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=True)
         else:
             df = star.remove_new_relion31(dfaux, inplace=True)
-            star.write_star(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=False)
+            star.write_starfile(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=False)
 
     if args.output is not None:
         if not args.relion2:  # Relion 3.1 style output.
             df = star.remove_deprecated_relion2(df, inplace=True)
-            star.write_star(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=True)
+            star.write_starfile(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=True)
         else:
             df = star.remove_new_relion31(df, inplace=True)
-            star.write_star(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=False)
+            star.write_starfile(args.output, df, resort_records=args.sort, simplify=args.augment_output, optics=False)
     return 0
 
 
-if __name__ == "__main__":
+def _main_():
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--auxout", help="Auxilliary output .star file with deselected particles", type=str)
     parser.add_argument("--noaugment", help="Do not augment inputs", dest="augment", action="store_false")
@@ -301,23 +311,27 @@ if __name__ == "__main__":
     parser.add_argument("--copy-alignments", help="Source for alignment parameters (angles and shifts)")
     parser.add_argument("--copy-ctf", help="Source for CTF parameters (file or quoted glob)")
     parser.add_argument("--copy-optics", help="Source for optics groups")
-    parser.add_argument("--copy-micrograph-coordinates", help="Source for micrograph paths and particle coordinates (file or quoted glob)",
+    parser.add_argument("--copy-micrograph-coordinates",
+                        help="Source for micrograph paths and particle coordinates (file or quoted glob)",
                         type=str)
     parser.add_argument("--copy-paths", help="Source for particle paths (must align exactly with input .star file)",
                         type=str)
-    parser.add_argument("--copy-reconstruct-images", help="Source for rlnReconstructImage (must align exactly with input .star file)")
+    parser.add_argument("--copy-reconstruct-images",
+                        help="Source for rlnReconstructImage (must align exactly with input .star file)")
     parser.add_argument("--merge-source", help="Source .star for merge")
     parser.add_argument("--merge-fields", help="Field(s) to merge", metavar="f1,f2...fN", type=str)
     parser.add_argument("--merge-key", help="Override merge key detection with explicit key field(s)",
                         metavar="f1,f2...fN", type=str)
     parser.add_argument("--by-original", help="Merge using \"original\" field name in input .star", action="store_true")
-    parser.add_argument("--revert-original", help="Swap ImageName and ImageOriginalName before writing", action="store_true")
+    parser.add_argument("--revert-original", help="Swap ImageName and ImageOriginalName before writing",
+                        action="store_true")
     parser.add_argument("--drop-angles", help="Drop tilt, psi and rot angles from output",
                         action="store_true")
     parser.add_argument("--drop-containing",
                         help="Drop fields containing string from output, may be passed multiple times",
                         action="append")
-    parser.add_argument("--drop-optics-group", help="Drop this optics group, may be passed multiple times", action="append")
+    parser.add_argument("--drop-optics-group", help="Drop this optics group, may be passed multiple times",
+                        action="append")
     parser.add_argument("--info", help="Print information about initial file",
                         action="store_true")
     parser.add_argument("--invert", help="Invert field match conditions",
@@ -333,7 +347,8 @@ if __name__ == "__main__":
                         action="store_true")
     #    parser.add_argument("--seed", help="Seed for random number generators",
     #                        type=int)
-    parser.add_argument("--min-separation", help="Minimum distance in Angstroms between particle coordinates", type=float)
+    parser.add_argument("--min-separation", help="Minimum distance in Angstroms between particle coordinates",
+                        type=float)
     parser.add_argument("--scale", help="Factor to rescale particle coordinates, origins, and magnification",
                         type=float)
     parser.add_argument("--scale-particles",
@@ -349,7 +364,8 @@ if __name__ == "__main__":
                         type=float)
     parser.add_argument("--split-micrographs", help="Write separate output file for each micrograph",
                         action="store_true")
-    parser.add_argument("--micrograph-range", help="Write micrographs with alphanumeric sort index [m, n) to output file",
+    parser.add_argument("--micrograph-range",
+                        help="Write micrographs with alphanumeric sort index [m, n) to output file",
                         metavar="m,n")
     parser.add_argument("--subset", help="Select one half-set", type=int)
     parser.add_argument("--subsample", help="Randomly subsample remaining particles",
@@ -361,8 +377,11 @@ if __name__ == "__main__":
     parser.add_argument("--to-micrographs", help="Convert particles STAR to micrographs STAR",
                         action="store_true")
     parser.add_argument("--micrograph-path", help="Replacement path for micrographs")
-    parser.add_argument("--strip-uid", help="Strip UIDs in particle and micrograph paths", nargs="?", type=int, default=None)
-    parser.add_argument("--set-optics", help="Determine optics groups from micrograph basename using a separator and index (e.g. _,4)", type=str)
+    parser.add_argument("--strip-uid", help="Strip UIDs in particle and micrograph paths", nargs="?", type=int,
+                        default=None)
+    parser.add_argument("--set-optics",
+                        help="Determine optics groups from micrograph basename using a separator and index (e.g. _,4)",
+                        type=str)
     parser.add_argument("--offset-optics", help="Offset the optics groups by N", type=int, metavar="N")
     parser.add_argument("--transform",
                         help="Apply rotation matrix or 3x4 rotation plus translation matrix to particles (Numpy format)",
@@ -374,3 +393,7 @@ if __name__ == "__main__":
     parser.add_argument("input", help="Input .star file(s) or unquoted glob", nargs="*")
     parser.add_argument("output", help="Output .star file")
     sys.exit(main(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    _main_()

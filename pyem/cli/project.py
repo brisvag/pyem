@@ -17,7 +17,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-from __future__ import print_function
 import logging
 import numpy as np
 import sys
@@ -143,9 +142,8 @@ def project(f3d, p, s, sx, sy, a, pfac=2, apply_ctf=False, size=None, flip_phase
     return f2d
 
 
-if __name__ == "__main__":
+def _main_():
     import argparse
-
     parser = argparse.ArgumentParser()
     parser.add_argument("input", help="STAR file with particle metadata")
     parser.add_argument("output", help="Output particle stack")
@@ -163,3 +161,7 @@ if __name__ == "__main__":
     parser.add_argument("--loglevel", "-l", help="Logging level and debug output", metavar="LEVEL", type=str,
                         default="WARNING")
     sys.exit(main(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    _main_()
